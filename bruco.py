@@ -5,7 +5,7 @@ Brute force coherence (Gabriele Vajente, 2017-05-25)
 
 Command line arguments (with default values)
 
---ifo                                     interferometer prefix [H1, L1, V1] 
+--ifo                                     interferometer prefix [H1, L1, V1, K1]
                                           (no default, must specify)
 
 --channel=OAF-CAL_DARM_DQ                 name of the main channel
@@ -18,6 +18,9 @@ Command line arguments (with default values)
 					  the specified time duration
 
 --excluded=bruco_excluded_channels.txt    file containing the list of channels excluded 
+
+--included=bruco_included_channels.txt    file containing the list of channels included
+
                                           from the coherence computation
 
 --gpsb=1087975458                         starting time
@@ -164,7 +167,7 @@ def parallelized_coherence(args):
 
         # check if the channel is flat, and skip it if so
         if min(ch2) == max(ch2):
-            print "  Process %d: %s is flat, skipping" % (id, channel2)
+            #print "  Process %d: %s is flat, skipping" % (id, channel2)
             continue
 
 	# maximum frequency which is meaningful
@@ -231,13 +234,15 @@ def parallelized_coherence(args):
             if firstplot:
                 pltitle = ax[0].set_title('Coherence %s vs %s - GPS %d' % \
                                     (opt.channel, channel2, gpsb), fontsize='smaller')
-                line1, line2 = ax[0].loglog(f, c, f, ones(shape(f))*s, 
+                # change from loglog to semilogx
+                line1, line2 = ax[0].semilogx(f, c, f, ones(shape(f))*s, 
                                                         'r--', linewidth=0.5)
                 if xmin != -1:
                     ax[0].axis(xmin=xmin,xmax=xmax)
                 else:
                     ax[0].axis(xmax=outfs/2)
-                ax[0].axis(ymin=s/2, ymax=1)
+                #ax[0].axis(ymin=s/2, ymax=1)
+                ax[0].axis(ymin=0, ymax=1)
                 ax[0].grid(True)
                 ax[0].set_ylabel('Coherence')
                 line3, = ax[1].loglog(f1, psd_plot[0:len(f1)])
@@ -250,7 +255,7 @@ def parallelized_coherence(args):
                     ax[1].axis(ymin=ymin, ymax=ymax)
                 ax[1].set_xlabel('Frequency [Hz]')
                 ax[1].set_ylabel('Spectrum')
-                ax[1].legend(('Target channel', 'Noise projection'))
+                ax[1].legend(('Target channel', 'Noise projection'),loc='best')
                 ax[1].grid(True)
                 firstplot = False
             else:
@@ -323,6 +328,10 @@ parser.add_option("-e", "--excluded", dest="excluded",
                   default='',
                   help="list of channels excluded from the coherence computation", 
                                                                     metavar="Excluded")
+parser.add_option("-I", "--included", dest="included",
+                  default='',
+                  help="list of channels included from the coherence computation",
+                                                                    metavar="Included")
 parser.add_option("-T", "--tmp", dest="scratchdir",
                   default=scratchdir,
                   help="temporary file directory", metavar="Tmp")
@@ -352,6 +361,13 @@ else:
 # parse list of excluded channels. If not specified use default
 if opt.excluded != '':
     exc = opt.excluded
+    exclude = True
+
+# parse list of include channels. If not specified use default
+if opt.included != '':
+    inc = opt.included
+    include = True
+    #exclude = False
     
 ###### Prepare folders and stuff for the processing loops ################################
 
@@ -367,6 +383,8 @@ elif opt.ifo == 'H1' or opt.ifo == 'L1':
     from bruco.ligodata import *
 elif opt.ifo == 'V1':
     from bruco.virgodata import *
+elif opt.ifo == 'K1':
+    from bruco.kagradata import *
 else:
     print "Unknown IFO %s" % opt.ifo
     exit()
@@ -379,28 +397,67 @@ print
 channels, sample_rate = get_channel_list(opt, gpsb)
 
 # keep only channels with high enough sampling rate
-idx = find(sample_rate >= minfs)
+idx = find(sample_rate >= minfs) # change from >=
 channels = channels[idx]
 sample_rate = sample_rate[idx]
+
+# ----------------------------------------
+# Please commentout if you dont use include option with exculde
+# ----------------------------------------
+if opt.included != '':
+    # load inclusion list from file
+    f = open(inc, 'r')
+    L = f.readlines()
+    included = []
+
+    for c in L:
+        c = c.split()[0]
+        included.append(c)
+    f.close()
+
+    # include
+    if include:
+        idx = zeros(shape(channels), dtype='bool')    
+
+    for c,i in zip(channels, arange(len(channels))):
+        if c == opt.ifo + ':' + opt.channel:
+            # remove the main channel
+            idx[i] = False
+        for e in included:
+            if fnmatch.fnmatch(c, opt.ifo + ':' + e):
+                if include:
+                    idx[i] = True
+
+    channels = channels[idx]
+# ----------------------------------------
+# ----------------------------------------
 
 # load exclusion list from file
 f = open(exc, 'r')
 L = f.readlines()
 excluded = []
+
 for c in L:
     c = c.split()[0]
     excluded.append(c)
 f.close()
 
 # delete excluded channels, allowing for unix-shell-like wildcards
-idx = ones(shape(channels), dtype='bool')
+if exclude:
+    idx = ones(shape(channels), dtype='bool')
+else:
+    idx = zeros(shape(channels), dtype='bool')
+
 for c,i in zip(channels, arange(len(channels))):
     if c == opt.ifo + ':' + opt.channel:
-	# remove the main channel
-	idx[i] = False
+       # remove the main channel
+       idx[i] = False
     for e in excluded:
         if fnmatch.fnmatch(c, opt.ifo + ':' + e):
-            idx[i] = False
+            if exclude:
+                idx[i] = False
+            else:
+                idx[i] = True
 
 channels = channels[idx]
 
@@ -443,7 +500,7 @@ if min(ch1) == max(ch1):
 # determine the number of points per FFT
 npoints = pow(2,int(log((gpse - gpsb) * outfs / nav) / log(2)))
 print "Number of points = %d\n" % npoints
-
+#exit()
 # compute the main channels FFTs and PSD. Here I save the single segments FFTS,
 # to reuse them later on in the CSD computation. In this way, the main channel FFTs are
 # computed only once, instead of every iteration. This function returns the FFTs already
